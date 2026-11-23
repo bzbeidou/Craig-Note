@@ -1,0 +1,67 @@
+# 后端测试分层与验证策略
+
+## 1. 测试层级
+
+BM1684X 后端测试可按抽象边界划分：
+
+| 层级 | 主要入口 | 验证对象 | 典型故障 |
+|---|---|---|---|
+| 指令/atomic | `bm1684x/test` | 字段编码、LMEM 布局、cmodel 语义 | 位域、对齐、边界组合 |
+| kernel/nodechip | `test/test_layer` | tiling、局部内存规划、算子实现 | 切分、尾块、融合 |
+| API/全栈 | `tpuDNN/tests`、`tests_py` | host API 至固件的完整路径 | 路由、参数传递、同步、运行时 |
+| 硬件/PLD | `test_pld` 或真机环境 | 实际执行、时序与硬件一致性 | cmodel 差异、并发、未定义输入 |
+
+层级越低，故障定位越精确；层级越高，越能覆盖真实使用路径。两者不是替代关系。
+
+## 2. 差分定位
+
+当全栈卷积失败时，可按以下顺序缩小范围：
+
+```text
+全栈 case 失败
+  ├─ atomic/cmodel 同形状也失败：检查编码、布局、参考模型与指令语义
+  └─ atomic/cmodel 通过：检查 tiling、GDMA、依赖、路由和 API 参数转换
+```
+
+这里必须保证“同形状”还包括精度、布局、stride、padding、常数标志、累加模式和舍入规则。只比较 NCHW 不能构成有效的差分实验。
+
+## 3. 测试矩阵
+
+建议为每条指令建立结构化测试维度：
+
+- 字段边界：0、1、最大合法值、首个非法值；
+- 形状边界：小于、等于和大于 lane/EU/cube 宽度；
+- 布局：aligned、compact、自定义 stride、不同起始 lane/bank；
+- 数据类型：输入、累加、输出及合法/非法组合；
+- 模式：常数操作数、bias、result-add、kernel-rotate、短/长命令；
+- 依赖：缺失、冗余、交叉引擎、双缓冲与并发；
+- 数值：随机、极值、NaN/Inf、溢出、不同舍入模式。
+
+人工枚举难以覆盖组合空间，可引入 property-based testing：由约束生成合法描述符，再比较 reference、cmodel 和硬件输出；对非法描述符则验证编译器能否在下发前拒绝。
+
+## 4. 参考实现与判定标准
+
+共享 CPU reference 能减少重复，但也可能形成共同错误。关键算子至少需要两种相互独立的 oracle：
+
+1. 直接数学实现或高精度参考；
+2. cmodel/设备实现。
+
+浮点比较应依据误差模型设置绝对误差、相对误差或 ULP 阈值，并记录累加顺序和精度。低精度与量化路径还需验证 scale、zero-point、饱和和舍入。
+
+## 5. 面向编译器的验证升级
+
+Mirage 将优化搜索与等价性验证结合，Tenspiler 使用 verified lifting 将顺序程序提升为张量表达。对本后端可分阶段实现：
+
+- 为描述符定义机器可读 schema，自动生成编码/解码 round-trip 测试；
+- 为 tiling 定义覆盖与不重叠证明条件；
+- 为布局转换生成索引双射检查；
+- 对依赖图做无环、无读前写和无生命周期冲突验证；
+- 对优化前后 IR 进行随机差分和符号化小尺寸验证。
+
+测试体系的目标不应止于“发现 bug”，还应为自动调度器提供可信的搜索边界：只有通过合法性与等价性检查的候选，才能进入性能测量阶段。
+
+## 参考
+
+- [Mirage, OSDI 2025](https://www.usenix.org/conference/osdi25/presentation/wu-mengdi)
+- [Tenspiler, ECOOP 2024](https://drops.dagstuhl.de/entities/document/10.4230/LIPIcs.ECOOP.2024.32)
+
